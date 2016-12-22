@@ -14,12 +14,11 @@ let lastProcessedIndex;
 let fpath = __dirname + '/.lastsync.txt';
 let streamer;
 let connection;
-let counter = 0;
 
 console.log('Pump messages from db to SMTP');
 
 try {
-    lastProcessedIndex = fs.readFileSync(fpath);
+    lastProcessedIndex = fs.readFileSync(fpath, 'utf-8').trim();
     console.log('Starting from %s', lastProcessedIndex);
 } catch (E) {
     lastProcessedIndex = 'seq ';
@@ -72,17 +71,24 @@ function sendMessages(db, messages) {
             return db.close();
         }
         let seqKey = messages[pos++];
+
+        if (!seqKey) {
+            console.log('NO SEQ KEY');
+            return processNext();
+        }
+
+        try {
+            fs.writeFileSync(fpath, seqKey);
+        } catch (E) {
+            console.log('FAILED writing %s', seqKey);
+            console.log(E);
+            return db.close();
+        }
+
         sendMessage(seqKey, err => {
             if (err) {
                 console.log('FAILED message "%s"', seqKey);
                 console.log(err);
-            }
-            try {
-                fs.writeFileSync(fpath, seqKey);
-            } catch (E) {
-                console.log('FAILED writing %s', seqKey);
-                console.log(E);
-                return db.close();
             }
 
             setImmediate(processNext);
@@ -116,6 +122,11 @@ function sendMessage(seqKey, callback) {
                     return callback(err);
                 }
 
+                if (!meta) {
+                    console.log('NO META FOUND FOR %s', message.id);
+                    return callback(null);
+                }
+
                 Object.keys(meta || {}).forEach(key => {
                     if (!(key in message)) {
                         message[key] = meta[key];
@@ -124,7 +135,7 @@ function sendMessage(seqKey, callback) {
 
                 message.headers = new mailsplit.Headers(message.headers);
 
-                console.log('Message %s from=%s to=%s', message.id, message.from, message.to);
+                console.log('Message %s from=%s to=%s', message.id, message.from, message.recipient);
 
                 message.headers.add('X-Sending-Zone', 'rescue');
 
@@ -134,7 +145,7 @@ function sendMessage(seqKey, callback) {
                     }
                     connection.send({
                         from: message.from,
-                        to: message.to
+                        to: [message.recipient]
                     }, getMessageStream(message), (err, info) => {
                         if (err) {
                             return callback(err);
