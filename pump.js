@@ -1,33 +1,40 @@
-/* eslint no-console: 0 */
-
 'use strict';
 
+const log = require('npmlog');
 const config = require('config');
 const level = require('levelup');
-const leveldown = require('leveldown-basho-andris');
+const leveldown = require(config.backend);
 const mailsplit = require('mailsplit');
 const SMTPConnection = require('smtp-connection');
 const levelStreamAccess = require('level-stream-access');
 const PassThrough = require('stream').PassThrough;
 const fs = require('fs');
+
 let lastProcessedIndex;
 let fpath = __dirname + '/.lastsync.txt';
 let streamer;
 let connection;
 
-console.log('Pump messages from db to SMTP');
+log.info('Pump', 'Pump messages from DB to SMTP');
+log.info('Pump', 'ZoneMTA queue location: "%s"', config.queue);
+log.info('Pump', 'Target host : "%s"', config.smtp.host || 'unset');
+log.info('Pump', 'Target port : "%s"', config.smtp.port || 'unset');
+log.info('Pump', 'Use SSL     : "%s"', config.smtp.secure ? 'YES' : 'NO');
+log.info('Pump', 'Use auth    : "%s"', config.smtp.auth ? 'YES' : 'NO');
 
 try {
     lastProcessedIndex = fs.readFileSync(fpath, 'utf-8').trim();
-    console.log('Starting from %s', lastProcessedIndex);
+    log.info('Pump', 'Enumerating messages from "%s"', lastProcessedIndex);
 } catch (E) {
     lastProcessedIndex = 'seq ';
+    log.info('Pump', 'Enumerating messages from start');
 }
 
 let db = level(config.queue, {
     createIfMissing: true,
     db: leveldown
 }, () => {
+    log.info('Pump', 'Database opened at "%s"', config.queue);
     let messages = [];
     streamer = levelStreamAccess(db);
 
@@ -39,56 +46,63 @@ let db = level(config.queue, {
     }).on('data', key => {
         messages.push(key);
     }).on('error', err => {
-        console.log('Oh my!', err);
+        log.error('Pump', 'Failed reading from stream. error="%s"', err.message);
         db.close();
     }).on('close', () => {
-        console.log('Stream closed');
+        log.info('Pump', 'Stream closed');
     }).on('end', () => {
-        console.log('Stream ended');
+        log.info('Pump', 'Stream ended. Retrieved %s messages', messages.length);
+        if(!messages.length){
+            return setTimeout(close, 100);
+        }
         sendMessages(db, messages);
     });
 });
 
 db.on('error', err => {
-    console.log('ERROR');
-    console.log(err);
+    log.error('Pump', 'Databse error. error="%s"', err.message);
     process.exit(1);
 });
 
 db.on('closing', () => {
-    console.log('Database closing...');
+    log.info('Pump', 'Database closing...');
 });
 
 db.on('closed', () => {
-    console.log('Database closed');
+    log.info('Pump', 'Database closed');
 });
+
+function close() {
+    if (connection) {
+        connection.close();
+    }
+    db.close();
+}
 
 function sendMessages(db, messages) {
     let pos = 0;
     let processNext = () => {
         if (pos >= messages.length) {
-            console.log('DONE');
-            return db.close();
+            log.info('Pump', 'All messages processed');
+            return close();
         }
         let seqKey = messages[pos++];
 
         if (!seqKey) {
-            console.log('NO SEQ KEY');
+            log.error('Pump', 'Invalid sequence key retrieved from stream');
             return processNext();
         }
 
         try {
             fs.writeFileSync(fpath, seqKey);
         } catch (E) {
-            console.log('FAILED writing %s', seqKey);
-            console.log(E);
-            return db.close();
+            log.error('Pump', 'Failed updating sequence key. key="%s" error="%s"', seqKey, E.message);
+            return close();
         }
 
         sendMessage(seqKey, err => {
             if (err) {
-                console.log('FAILED message "%s"', seqKey);
-                console.log(err);
+                log.error('Pump', 'Failed sending message. key="%s" error="%s"', seqKey, err.message);
             }
 
             setImmediate(processNext);
@@ -103,7 +117,7 @@ function sendMessage(seqKey, callback) {
         if (err) {
             return callback(err);
         }
-        console.log('Processing %s', refKey);
+        log.info('Pump', 'Processing next message. seq="%s" ref="%s"', seqKey, refKey);
         db.get(refKey, (err, data) => {
             if (err) {
                 return callback(err);
@@ -112,8 +126,7 @@ function sendMessage(seqKey, callback) {
             try {
                 message = JSON.parse(data);
             } catch (E) {
-                console.log('PARSE ERROR');
-                console.log(data);
+                log.error('Pump', 'Invalid content for ref key. error="%s" data="%s"', E.message, Buffer.from(data).toString('base64'));
                 return callback(E);
             }
 
@@ -123,7 +136,7 @@ function sendMessage(seqKey, callback) {
                 }
 
                 if (!meta) {
-                    console.log('NO META FOUND FOR %s', message.id);
+                    log.error('Pump', 'No metadata found for ref key, skipping');
                     return callback(null);
                 }
 
@@ -134,9 +147,6 @@ function sendMessage(seqKey, callback) {
                 });
 
                 message.headers = new mailsplit.Headers(message.headers);
-
-                console.log('Message %s from=%s to=%s', message.id, message.from, message.recipient);
-
                 message.headers.add('X-Sending-Zone', 'rescue');
 
                 getConnection((err, connection) => {
@@ -148,10 +158,11 @@ function sendMessage(seqKey, callback) {
                         to: [message.recipient]
                     }, getMessageStream(message), (err, info) => {
                         if (err) {
-                            return callback(err);
+                            log.info('Pump', '%s.%s FAILED from=%s to=%s response="%s" error="%s"', message.id, message.seq, message.from, message.recipient, err.response || err.message);
+                            return callback();
                         }
-                        console.log(info.response);
-                        return callback(null, true);
+                        log.info('Pump', '%s.%s ACCEPTED from=%s to=%s response="%s"', message.id, message.seq, message.from, message.recipient, info.response);
+                        return callback();
                     });
                 });
             });
@@ -173,8 +184,7 @@ function getConnection(callback) {
     }
     connection = new SMTPConnection(config.smtp);
     connection.on('error', err => {
-        console.log('CONNECTION ERROR');
-        console.log(err);
+        log.error('Pump', 'Connection error. error="%s"', err.message);
         db.close(() => process.exit(1));
         setTimeout(() => process.exit(1), 100);
     });

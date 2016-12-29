@@ -2,8 +2,9 @@
 
 module.exports = {
     queue: './data',
+    backend: 'leveldown-basho-andris',
     smtp: {
         host: 'localhost',
-        port: 4677
+        port: 2525
     }
 };

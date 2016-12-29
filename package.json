@@ -1,20 +1,24 @@
 {
-  "name": "zone-mta-light",
+  "name": "zone-mta-recover",
   "private": true,
   "version": "1.0.0",
-  "description": "",
-  "main": ".eslintrc.js",
+  "description": "Recover messages from ZoneMTA queue database",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "repair": "node repair.js",
+    "pump": "node pump.js"
   },
-  "author": "",
+  "author": "Andris Reinman",
   "license": "ISC",
   "dependencies": {
     "config": "^1.24.0",
     "level-stream-access": "^2.3.0",
-    "leveldown-basho-andris": "^1.5.0-andris.4",
     "levelup": "^1.3.3",
     "mailsplit": "^3.1.2",
+    "npmlog": "^4.0.2",
     "smtp-connection": "^3.1.0"
+  },
+  "optionalDependencies": {
+    "leveldown-basho-andris": "^1.5.0-andris.6",
+    "leveldown": "^1.5.1"
   }
 }
